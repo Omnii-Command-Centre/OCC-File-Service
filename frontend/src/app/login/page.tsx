@@ -4,6 +4,7 @@ import { useState, FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/lib/auth-context';
+import OmniiLogo from '@/components/OmniiLogo';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -32,6 +33,7 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center px-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
+          <OmniiLogo className="w-14 h-14 mx-auto mb-4 text-white" />
           <h1 className="text-3xl font-bold text-white mb-2">
             <span className="text-omnii-500">Omnii</span> Command Centre
           </h1>

@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
+import OmniiLogo from '@/components/OmniiLogo';
 
 const navItems = [
   {
@@ -42,8 +43,11 @@ export default function Sidebar() {
     <aside className="w-64 h-screen bg-dark-1 border-r border-dark-4 flex flex-col fixed left-0 top-0">
       {/* Branding */}
       <div className="p-5 border-b border-dark-4">
-        <h1 className="text-lg font-bold text-white">
-          <span className="text-omnii-500">Omnii</span> Command Centre
+        <h1 className="flex items-center gap-3 text-lg font-bold text-white">
+          <OmniiLogo className="w-8 h-8 shrink-0" />
+          <span>
+            <span className="text-omnii-500">Omnii</span> Command Centre
+          </span>
         </h1>
       </div>
 

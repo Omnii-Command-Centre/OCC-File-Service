@@ -90,6 +90,14 @@ class ApiClient {
     return this.request(`/api/agents/${id}`, { method: 'DELETE' });
   }
 
+  async getDeletedAgents(): Promise<{ agents: (Agent & { deleted_at: string })[] }> {
+    return this.request('/api/agents/deleted');
+  }
+
+  async restoreAgent(id: string): Promise<{ message: string }> {
+    return this.request(`/api/agents/${id}/restore`, { method: 'POST' });
+  }
+
   async getAgentAccess(agentId: string): Promise<{ access: { user_id: string; name: string; email: string }[] }> {
     return this.request(`/api/agents/${agentId}/access`);
   }

@@ -202,7 +202,20 @@ export async function initializeDatabase(): Promise<void> {
     ALTER TABLE contract_documents ADD extracted_text NVARCHAR(MAX) NULL
   `);
 
+  // Soft-delete support: deleted agents/conversations go to a recycle bin
+  // and can be restored for 30 days before being purged permanently
+  await db.request().query(`
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('agents') AND name = 'deleted_at')
+    ALTER TABLE agents ADD deleted_at DATETIME2 NULL
+  `);
+
+  await db.request().query(`
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('conversations') AND name = 'deleted_at')
+    ALTER TABLE conversations ADD deleted_at DATETIME2 NULL
+  `);
+
   await cleanupExpiredDocuments();
+  await purgeSoftDeleted();
 }
 
 // Retention policy: uploaded contracts are kept for 90 days, then removed
@@ -218,5 +231,34 @@ export async function cleanupExpiredDocuments(): Promise<void> {
     }
   } catch (err: any) {
     console.error('Document retention cleanup failed:', err.message);
+  }
+}
+
+// Permanently remove agents/conversations soft-deleted more than 30 days ago.
+// Conversations under a purged agent go with it; child rows first (FK order).
+export async function purgeSoftDeleted(): Promise<void> {
+  try {
+    const db = await getPool();
+    const purgeable = `
+      SELECT c.id FROM conversations c
+      LEFT JOIN agents a ON a.id = c.agent_id
+      WHERE c.deleted_at < DATEADD(day, -30, GETUTCDATE())
+         OR a.deleted_at < DATEADD(day, -30, GETUTCDATE())`;
+
+    await db.request().query(`DELETE FROM contract_documents WHERE conversation_id IN (${purgeable})`);
+    await db.request().query(`DELETE FROM messages WHERE conversation_id IN (${purgeable})`);
+    await db.request().query(`DELETE FROM conversations WHERE id IN (${purgeable})`);
+    await db.request().query(`
+      DELETE FROM agent_access WHERE agent_id IN
+      (SELECT id FROM agents WHERE deleted_at < DATEADD(day, -30, GETUTCDATE()))`);
+    const result = await db.request().query(
+      `DELETE FROM agents WHERE deleted_at < DATEADD(day, -30, GETUTCDATE())`
+    );
+    const removed = result.rowsAffected?.[0] || 0;
+    if (removed > 0) {
+      console.log(`Recycle bin: purged ${removed} agent(s) deleted more than 30 days ago`);
+    }
+  } catch (err: any) {
+    console.error('Recycle bin purge failed:', err.message);
   }
 }

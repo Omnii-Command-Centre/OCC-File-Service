@@ -13,6 +13,8 @@ export default function AgentsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editAgent, setEditAgent] = useState<Agent | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [deletedAgents, setDeletedAgents] = useState<(Agent & { deleted_at: string })[]>([]);
+  const [showBin, setShowBin] = useState(false);
 
   const fetchAgents = () => {
     setIsLoading(true);
@@ -21,6 +23,10 @@ export default function AgentsPage() {
       .then((data) => setAgents(data.agents || []))
       .catch(console.error)
       .finally(() => setIsLoading(false));
+    api
+      .getDeletedAgents()
+      .then((data) => setDeletedAgents(data.agents || []))
+      .catch(console.error);
   };
 
   useEffect(() => {
@@ -55,10 +61,19 @@ export default function AgentsPage() {
   const handleDeleteAgent = async (id: string) => {
     try {
       await api.deleteAgent(id);
-      setAgents((prev) => prev.filter((a) => a.id !== id));
       setDeleteConfirm(null);
+      fetchAgents(); // moves into the recycle bin list
     } catch (err) {
       console.error('Failed to delete agent:', err);
+    }
+  };
+
+  const handleRestoreAgent = async (id: string) => {
+    try {
+      await api.restoreAgent(id);
+      fetchAgents();
+    } catch (err) {
+      console.error('Failed to restore agent:', err);
     }
   };
 
@@ -170,6 +185,40 @@ export default function AgentsPage() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Recycle bin — deleted agents restorable for 30 days */}
+        {deletedAgents.length > 0 && (
+          <div className="mt-8">
+            <button
+              onClick={() => setShowBin((v) => !v)}
+              className="text-sm text-surface-500 hover:text-surface-300"
+              type="button"
+            >
+              🗑 Recycle bin ({deletedAgents.length}) {showBin ? '▲' : '▼'}
+            </button>
+            {showBin && (
+              <div className="space-y-2 mt-3">
+                {deletedAgents.map((agent) => (
+                  <div key={agent.id} className="card flex items-center justify-between opacity-70">
+                    <div className="flex-1 mr-4">
+                      <h3 className="font-medium text-surface-300">{agent.name}</h3>
+                      <p className="text-xs text-surface-600">
+                        Deleted {new Date(agent.deleted_at).toLocaleDateString()} — kept for 30 days
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleRestoreAgent(agent.id)}
+                      className="btn-secondary text-xs px-3 py-1.5"
+                      type="button"
+                    >
+                      Restore
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

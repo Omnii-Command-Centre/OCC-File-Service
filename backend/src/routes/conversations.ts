@@ -27,7 +27,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     let query = `SELECT c.id, c.agent_id, c.user_id, c.title, c.created_at, c.updated_at
                  FROM conversations c
-                 WHERE c.user_id = @user_id`;
+                 WHERE c.user_id = @user_id AND c.deleted_at IS NULL`;
 
     if (agentId) {
       query += ' AND c.agent_id = @agent_id';
@@ -599,37 +599,27 @@ Return ONLY the JSON object, no other text.`;
   }
 });
 
-// DELETE /:id — delete conversation and its messages
+// DELETE /:id — move conversation to the recycle bin (restorable for 30 days)
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const pool = await getPool();
     const userId = (req as any).user.userId;
 
-    // Verify ownership
-    const existing = await pool
+    // Soft delete: messages stay in the database for 30 days so the
+    // conversation can be restored on request before being purged
+    const result = await pool
       .request()
       .input('id', sql.UniqueIdentifier, req.params.id)
       .input('user_id', sql.UniqueIdentifier, userId)
-      .query('SELECT id FROM conversations WHERE id = @id AND user_id = @user_id');
+      .query(
+        'UPDATE conversations SET deleted_at = GETUTCDATE() WHERE id = @id AND user_id = @user_id AND deleted_at IS NULL'
+      );
 
-    if (existing.recordset.length === 0) {
+    if ((result.rowsAffected?.[0] || 0) === 0) {
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
-    // Delete messages first
-    await pool
-      .request()
-      .input('conversation_id', sql.UniqueIdentifier, req.params.id)
-      .query('DELETE FROM messages WHERE conversation_id = @conversation_id');
-
-    // Delete conversation
-    await pool
-      .request()
-      .input('id', sql.UniqueIdentifier, req.params.id)
-      .input('user_id', sql.UniqueIdentifier, userId)
-      .query('DELETE FROM conversations WHERE id = @id AND user_id = @user_id');
-
-    return res.json({ message: 'Conversation deleted successfully' });
+    return res.json({ message: 'Conversation moved to the recycle bin (restorable for 30 days)' });
   } catch (error: any) {
     console.error('Delete conversation error:', error);
     return res.status(500).json({ error: 'Internal server error' });

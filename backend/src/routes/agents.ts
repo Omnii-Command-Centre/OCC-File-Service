@@ -26,17 +26,42 @@ router.get('/', async (req: Request, res: Response) => {
          FROM agents a
          LEFT JOIN teams t ON t.id = a.team_id
          LEFT JOIN users u ON u.id = a.owner_id
-         WHERE a.owner_id = @user_id
+         WHERE a.deleted_at IS NULL
+           AND (a.owner_id = @user_id
             OR (a.visibility = 'team'
                 AND a.team_id IN (SELECT team_id FROM team_members WHERE user_id = @user_id))
             OR (a.visibility = 'selected'
-                AND a.id IN (SELECT agent_id FROM agent_access WHERE user_id = @user_id))
+                AND a.id IN (SELECT agent_id FROM agent_access WHERE user_id = @user_id)))
          ORDER BY a.created_at DESC`
       );
 
     return res.json({ agents: result.recordset });
   } catch (error: any) {
     console.error('List agents error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /deleted — recycle bin: agents this user deleted in the last 30 days
+// (must be declared before /:id so "deleted" is not parsed as an agent id)
+router.get('/deleted', async (req: Request, res: Response) => {
+  try {
+    const pool = await getPool();
+    const userId = (req as any).user.userId;
+
+    const result = await pool
+      .request()
+      .input('user_id', sql.UniqueIdentifier, userId)
+      .query(
+        `SELECT id, name, description, model, deleted_at
+         FROM agents
+         WHERE owner_id = @user_id AND deleted_at IS NOT NULL
+         ORDER BY deleted_at DESC`
+      );
+
+    return res.json({ agents: result.recordset });
+  } catch (error: any) {
+    console.error('List deleted agents error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -58,6 +83,7 @@ router.get('/:id', async (req: Request, res: Response) => {
          FROM agents a
          LEFT JOIN teams t ON t.id = a.team_id
          WHERE a.id = @id
+           AND a.deleted_at IS NULL
            AND (a.owner_id = @user_id
                 OR (a.visibility = 'team'
                     AND a.team_id IN (SELECT team_id FROM team_members WHERE user_id = @user_id))
@@ -165,7 +191,7 @@ router.put('/:id', async (req: Request, res: Response) => {
       .request()
       .input('id', sql.UniqueIdentifier, req.params.id)
       .input('owner_id', sql.UniqueIdentifier, userId)
-      .query('SELECT id FROM agents WHERE id = @id AND owner_id = @owner_id');
+      .query('SELECT id FROM agents WHERE id = @id AND owner_id = @owner_id AND deleted_at IS NULL');
 
     if (existing.recordset.length === 0) {
       return res.status(404).json({ error: 'Agent not found' });
@@ -287,7 +313,7 @@ router.get('/:id/access', async (req: Request, res: Response) => {
   }
 });
 
-// DELETE /:id — delete agent and its conversations/messages
+// DELETE /:id — move agent to the recycle bin (restorable for 30 days)
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const pool = await getPool();
@@ -298,39 +324,19 @@ router.delete('/:id', async (req: Request, res: Response) => {
       .request()
       .input('id', sql.UniqueIdentifier, req.params.id)
       .input('owner_id', sql.UniqueIdentifier, userId)
-      .query('SELECT id FROM agents WHERE id = @id AND owner_id = @owner_id');
+      .query('SELECT id FROM agents WHERE id = @id AND owner_id = @owner_id AND deleted_at IS NULL');
 
     if (existing.recordset.length === 0) {
       return res.status(404).json({ error: 'Agent not found' });
     }
 
-    // Delete messages belonging to this agent's conversations
-    await pool
-      .request()
-      .input('agent_id', sql.UniqueIdentifier, req.params.id)
-      .query(
-        `DELETE FROM messages WHERE conversation_id IN
-         (SELECT id FROM conversations WHERE agent_id = @agent_id)`
-      );
-
-    // Delete conversations belonging to this agent
-    await pool
-      .request()
-      .input('agent_id', sql.UniqueIdentifier, req.params.id)
-      .query('DELETE FROM conversations WHERE agent_id = @agent_id');
-
-    // Delete agent access grants
-    await pool
-      .request()
-      .input('agent_id', sql.UniqueIdentifier, req.params.id)
-      .query('DELETE FROM agent_access WHERE agent_id = @agent_id');
-
-    // Delete the agent
+    // Soft delete: the agent (and its conversations/messages) stay in the
+    // database for 30 days and can be restored via POST /:id/restore
     await pool
       .request()
       .input('id', sql.UniqueIdentifier, req.params.id)
       .input('owner_id', sql.UniqueIdentifier, userId)
-      .query('DELETE FROM agents WHERE id = @id AND owner_id = @owner_id');
+      .query('UPDATE agents SET deleted_at = GETUTCDATE() WHERE id = @id AND owner_id = @owner_id');
 
     // Log to audit_log
     const now = new Date();
@@ -347,9 +353,47 @@ router.delete('/:id', async (req: Request, res: Response) => {
          VALUES (@id, @user_id, @action, @entity_type, @entity_id, @created_at)`
       );
 
-    return res.json({ message: 'Agent deleted successfully' });
+    return res.json({ message: 'Agent moved to the recycle bin (restorable for 30 days)' });
   } catch (error: any) {
     console.error('Delete agent error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:id/restore — bring an agent back from the recycle bin
+router.post('/:id/restore', async (req: Request, res: Response) => {
+  try {
+    const pool = await getPool();
+    const userId = (req as any).user.userId;
+
+    const result = await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, req.params.id)
+      .input('owner_id', sql.UniqueIdentifier, userId)
+      .query(
+        'UPDATE agents SET deleted_at = NULL, updated_at = GETUTCDATE() WHERE id = @id AND owner_id = @owner_id AND deleted_at IS NOT NULL'
+      );
+
+    if ((result.rowsAffected?.[0] || 0) === 0) {
+      return res.status(404).json({ error: 'Agent not found in the recycle bin' });
+    }
+
+    await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, uuidv4())
+      .input('user_id', sql.UniqueIdentifier, userId)
+      .input('action', sql.NVarChar, 'agent_restored')
+      .input('entity_type', sql.NVarChar, 'agent')
+      .input('entity_id', sql.UniqueIdentifier, req.params.id)
+      .input('created_at', sql.DateTime2, new Date())
+      .query(
+        `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, created_at)
+         VALUES (@id, @user_id, @action, @entity_type, @entity_id, @created_at)`
+      );
+
+    return res.json({ message: 'Agent restored' });
+  } catch (error: any) {
+    console.error('Restore agent error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

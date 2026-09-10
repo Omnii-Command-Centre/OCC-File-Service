@@ -61,14 +61,14 @@ router.post('/register', async (req: Request, res: Response) => {
       );
 
     const token = jwt.sign(
-      { userId, email },
+      { userId, email, role: 'user' },
       process.env.JWT_SECRET as string,
       { expiresIn: (process.env.JWT_EXPIRES_IN || '24h') as string & jwt.SignOptions['expiresIn'] }
     );
 
     return res.status(201).json({
       token,
-      user: { id: userId, email, name, created_at: now, updated_at: now },
+      user: { id: userId, email, name, role: 'user', created_at: now, updated_at: now },
     });
   } catch (error: any) {
     console.error('Registration error:', error);
@@ -90,7 +90,7 @@ router.post('/login', async (req: Request, res: Response) => {
     const result = await pool
       .request()
       .input('email', sql.NVarChar, email)
-      .query('SELECT id, email, password_hash, name, created_at, updated_at FROM users WHERE email = @email');
+      .query('SELECT id, email, password_hash, name, role, created_at, updated_at FROM users WHERE email = @email');
 
     if (result.recordset.length === 0) {
       return res.status(401).json({ error: 'Invalid email or password' });
@@ -127,7 +127,7 @@ router.post('/login', async (req: Request, res: Response) => {
       );
 
     const token = jwt.sign(
-      { userId: user.id, email: user.email },
+      { userId: user.id, email: user.email, role: user.role || 'user' },
       process.env.JWT_SECRET as string,
       { expiresIn: (process.env.JWT_EXPIRES_IN || '24h') as string & jwt.SignOptions['expiresIn'] }
     );
@@ -138,6 +138,7 @@ router.post('/login', async (req: Request, res: Response) => {
         id: user.id,
         email: user.email,
         name: user.name,
+        role: user.role || 'user',
         created_at: user.created_at,
         updated_at: user.updated_at,
         last_login_at: now,
@@ -158,7 +159,7 @@ router.get('/me', authenticate, async (req: Request, res: Response) => {
       .request()
       .input('id', sql.UniqueIdentifier, (req as any).user.userId)
       .query(
-        `SELECT id, email, name, created_at, updated_at, last_login_at
+        `SELECT id, email, name, role, created_at, updated_at, last_login_at
          FROM users WHERE id = @id`
       );
 
@@ -169,6 +170,84 @@ router.get('/me', authenticate, async (req: Request, res: Response) => {
     return res.json({ user: result.recordset[0] });
   } catch (error: any) {
     console.error('Get current user error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /users — list all users (admin only)
+router.get('/users', authenticate, async (req: Request, res: Response) => {
+  try {
+    const pool = await getPool();
+    const currentUser = await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, (req as any).user.userId)
+      .query('SELECT role FROM users WHERE id = @id');
+
+    if (currentUser.recordset.length === 0 || currentUser.recordset[0].role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const result = await pool.request().query(
+      `SELECT id, email, name, role, created_at, updated_at, last_login_at
+       FROM users ORDER BY created_at ASC`
+    );
+
+    return res.json({ users: result.recordset });
+  } catch (error: any) {
+    console.error('List users error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /users/:userId/role — update a user's role (admin only)
+router.put('/users/:userId/role', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { role } = req.body;
+    if (!role || !['admin', 'user'].includes(role)) {
+      return res.status(400).json({ error: 'Role must be "admin" or "user"' });
+    }
+
+    const pool = await getPool();
+    const currentUser = await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, (req as any).user.userId)
+      .query('SELECT role FROM users WHERE id = @id');
+
+    if (currentUser.recordset.length === 0 || currentUser.recordset[0].role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    // Prevent removing your own admin access
+    if (req.params.userId === (req as any).user.userId && role !== 'admin') {
+      return res.status(400).json({ error: 'You cannot remove your own admin role' });
+    }
+
+    const now = new Date();
+    await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, req.params.userId)
+      .input('role', sql.NVarChar, role)
+      .input('updated_at', sql.DateTime2, now)
+      .query('UPDATE users SET role = @role, updated_at = @updated_at WHERE id = @id');
+
+    // Audit log
+    await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, uuidv4())
+      .input('user_id', sql.UniqueIdentifier, (req as any).user.userId)
+      .input('action', sql.NVarChar, 'role_changed')
+      .input('entity_type', sql.NVarChar, 'user')
+      .input('entity_id', sql.UniqueIdentifier, req.params.userId)
+      .input('details', sql.NVarChar, JSON.stringify({ new_role: role }))
+      .input('created_at', sql.DateTime2, now)
+      .query(
+        `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (@id, @user_id, @action, @entity_type, @entity_id, @details, @created_at)`
+      );
+
+    return res.json({ message: `User role updated to ${role}` });
+  } catch (error: any) {
+    console.error('Update role error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -136,6 +136,18 @@ class ApiClient {
     return this.request(`/api/conversations/${conversationId}`, { method: 'DELETE' });
   }
 
+  // Admin — User Management
+  async getUsers(): Promise<{ users: User[] }> {
+    return this.request('/api/auth/users');
+  }
+
+  async updateUserRole(userId: string, role: string): Promise<{ message: string }> {
+    return this.request(`/api/auth/users/${userId}/role`, {
+      method: 'PUT',
+      body: JSON.stringify({ role }),
+    });
+  }
+
   // Teams
   async getTeams(): Promise<{ teams: Team[] }> {
     return this.request('/api/teams');

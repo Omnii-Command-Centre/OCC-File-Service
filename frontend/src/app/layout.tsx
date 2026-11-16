@@ -5,6 +5,9 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'Omnii Command Centre',
   description: 'AI Agent Management Platform',
+  icons: {
+    icon: '/favicon.svg',
+  },
 };
 
 export default function RootLayout({

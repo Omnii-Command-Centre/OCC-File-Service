@@ -82,6 +82,50 @@ export async function runAgentWithDocument(
   }
 }
 
+// Run an agent with one or more images attached (vision: badge photos, screenshots)
+export async function runAgentWithImages(
+  systemPrompt: string,
+  messages: { role: 'user' | 'assistant'; content: string }[],
+  model: string,
+  images: { base64: string; mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' }[],
+  maxTokens: number = 8192
+): Promise<string> {
+  try {
+    const apiMessages: Anthropic.MessageParam[] = messages.map((m, i) => {
+      if (m.role === 'user' && i === messages.findIndex((x) => x.role === 'user')) {
+        const contentBlocks: Anthropic.ContentBlockParam[] = images.map((img) => ({
+          type: 'image' as const,
+          source: {
+            type: 'base64' as const,
+            media_type: img.mediaType,
+            data: img.base64,
+          },
+        }));
+        contentBlocks.push({ type: 'text' as const, text: m.content });
+        return { role: 'user' as const, content: contentBlocks };
+      }
+      return { role: m.role, content: m.content };
+    });
+
+    const response = await client.messages.stream({
+      model,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages: apiMessages,
+    }).finalMessage();
+
+    const textBlock = response.content.find((block) => block.type === 'text');
+    if (!textBlock || textBlock.type !== 'text') {
+      throw new Error('No text content in Claude response');
+    }
+
+    return textBlock.text;
+  } catch (error: any) {
+    handleAnthropicError(error);
+    throw error;
+  }
+}
+
 function handleAnthropicError(error: any): void {
   if (error?.status === 401) {
     throw new Error('Invalid Anthropic API key. Check ANTHROPIC_API_KEY environment variable.');

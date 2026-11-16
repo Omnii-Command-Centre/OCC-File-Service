@@ -18,6 +18,73 @@ export default function ChatInterface({ conversationId, agentId }: ChatInterface
   const [isLoading, setIsLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImageSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    e.target.value = '';
+    if (!files || files.length === 0 || isUploading) return;
+
+    if (files.length > 5) {
+      alert('Maximum 5 images per upload.');
+      return;
+    }
+
+    const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    for (const f of Array.from(files)) {
+      if (!validTypes.includes(f.type)) {
+        alert(`Unsupported type: ${f.name}. Use JPEG, PNG, GIF or WebP.`);
+        return;
+      }
+      if (f.size > 10 * 1024 * 1024) {
+        alert(`${f.name} is too large — images up to 10 MB are supported.`);
+        return;
+      }
+    }
+
+    setIsUploading(true);
+    try {
+      const images = await Promise.all(
+        Array.from(files).map(
+          (file) =>
+            new Promise<{ base64: string; mediaType: string }>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const result = reader.result as string;
+                resolve({ base64: result.split(',')[1] || '', mediaType: file.type });
+              };
+              reader.onerror = () => reject(reader.error);
+              reader.readAsDataURL(file);
+            })
+        )
+      );
+
+      const userContent = input.trim() || 'Process this image.';
+      setInput('');
+
+      const tempUserMsg: Message = {
+        id: `temp-img-${Date.now()}`,
+        conversation_id: conversationId,
+        role: 'user',
+        content: `[Image${images.length > 1 ? 's' : ''} attached] ${userContent}`,
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, tempUserMsg]);
+      setIsSending(true);
+
+      const data = await api.uploadImage(conversationId, userContent, images);
+      setMessages((prev) => {
+        const withoutTemp = prev.filter((m) => m.id !== tempUserMsg.id);
+        return [...withoutTemp, data.message, data.reply];
+      });
+    } catch (err: any) {
+      console.error('Image upload failed:', err);
+      alert(`Image upload failed: ${err.message || 'unknown error'}`);
+    } finally {
+      setIsUploading(false);
+      setIsSending(false);
+    }
+  };
 
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -175,6 +242,29 @@ export default function ChatInterface({ conversationId, agentId }: ChatInterface
             onChange={handleFileSelected}
             className="hidden"
           />
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/gif,image/webp"
+            multiple
+            onChange={handleImageSelected}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => imageInputRef.current?.click()}
+            disabled={isUploading || isSending}
+            title="Attach image(s) — badge photos, screenshots"
+            className="btn-primary px-3"
+          >
+            {isUploading ? (
+              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z" />
+              </svg>
+            )}
+          </button>
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}

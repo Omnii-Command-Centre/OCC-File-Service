@@ -132,8 +132,31 @@ class ApiClient {
     });
   }
 
+  async uploadImage(
+    conversationId: string,
+    content: string,
+    images: { base64: string; mediaType: string }[]
+  ): Promise<{ message: Message; reply: Message }> {
+    return this.request(`/api/conversations/${conversationId}/image`, {
+      method: 'POST',
+      body: JSON.stringify({ content, images }),
+    });
+  }
+
   async deleteConversation(conversationId: string): Promise<void> {
     return this.request(`/api/conversations/${conversationId}`, { method: 'DELETE' });
+  }
+
+  // Admin — User Management
+  async getUsers(): Promise<{ users: User[] }> {
+    return this.request('/api/auth/users');
+  }
+
+  async updateUserRole(userId: string, role: string): Promise<{ message: string }> {
+    return this.request(`/api/auth/users/${userId}/role`, {
+      method: 'PUT',
+      body: JSON.stringify({ role }),
+    });
   }
 
   // Teams

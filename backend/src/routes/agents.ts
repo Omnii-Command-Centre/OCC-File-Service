@@ -15,24 +15,42 @@ router.get('/', async (req: Request, res: Response) => {
     const pool = await getPool();
     const userId = (req as any).user.userId;
 
+    // Check if current user is an admin
+    const roleResult = await pool
+      .request()
+      .input('user_id', sql.UniqueIdentifier, userId)
+      .query('SELECT role FROM users WHERE id = @user_id');
+
+    const isAdmin = roleResult.recordset[0]?.role === 'admin';
+
     const result = await pool
       .request()
       .input('user_id', sql.UniqueIdentifier, userId)
       .query(
-        `SELECT DISTINCT a.id, a.name, a.description, a.system_prompt, a.model, a.config,
-                a.owner_id, a.team_id, a.visibility, a.created_at, a.updated_at,
-                t.name AS team_name,
-                u.name AS owner_name
-         FROM agents a
-         LEFT JOIN teams t ON t.id = a.team_id
-         LEFT JOIN users u ON u.id = a.owner_id
-         WHERE a.deleted_at IS NULL
-           AND (a.owner_id = @user_id
-            OR (a.visibility = 'team'
-                AND a.team_id IN (SELECT team_id FROM team_members WHERE user_id = @user_id))
-            OR (a.visibility = 'selected'
-                AND a.id IN (SELECT agent_id FROM agent_access WHERE user_id = @user_id)))
-         ORDER BY a.created_at DESC`
+        isAdmin
+          ? `SELECT DISTINCT a.id, a.name, a.description, a.system_prompt, a.model, a.config,
+                    a.owner_id, a.team_id, a.visibility, a.created_at, a.updated_at,
+                    t.name AS team_name,
+                    u.name AS owner_name
+             FROM agents a
+             LEFT JOIN teams t ON t.id = a.team_id
+             LEFT JOIN users u ON u.id = a.owner_id
+             WHERE a.deleted_at IS NULL
+             ORDER BY a.created_at DESC`
+          : `SELECT DISTINCT a.id, a.name, a.description, a.system_prompt, a.model, a.config,
+                    a.owner_id, a.team_id, a.visibility, a.created_at, a.updated_at,
+                    t.name AS team_name,
+                    u.name AS owner_name
+             FROM agents a
+             LEFT JOIN teams t ON t.id = a.team_id
+             LEFT JOIN users u ON u.id = a.owner_id
+             WHERE a.deleted_at IS NULL
+               AND (a.owner_id = @user_id
+                OR (a.visibility = 'team'
+                    AND a.team_id IN (SELECT team_id FROM team_members WHERE user_id = @user_id))
+                OR (a.visibility = 'selected'
+                    AND a.id IN (SELECT agent_id FROM agent_access WHERE user_id = @user_id)))
+             ORDER BY a.created_at DESC`
       );
 
     return res.json({ agents: result.recordset });
@@ -72,23 +90,37 @@ router.get('/:id', async (req: Request, res: Response) => {
     const pool = await getPool();
     const userId = (req as any).user.userId;
 
+    const roleResult = await pool
+      .request()
+      .input('user_id', sql.UniqueIdentifier, userId)
+      .query('SELECT role FROM users WHERE id = @user_id');
+
+    const isAdmin = roleResult.recordset[0]?.role === 'admin';
+
     const result = await pool
       .request()
       .input('id', sql.UniqueIdentifier, req.params.id)
       .input('user_id', sql.UniqueIdentifier, userId)
       .query(
-        `SELECT a.id, a.name, a.description, a.system_prompt, a.model, a.config,
-                a.owner_id, a.team_id, a.visibility, a.created_at, a.updated_at,
-                t.name AS team_name
-         FROM agents a
-         LEFT JOIN teams t ON t.id = a.team_id
-         WHERE a.id = @id
-           AND a.deleted_at IS NULL
-           AND (a.owner_id = @user_id
-                OR (a.visibility = 'team'
-                    AND a.team_id IN (SELECT team_id FROM team_members WHERE user_id = @user_id))
-                OR (a.visibility = 'selected'
-                    AND a.id IN (SELECT agent_id FROM agent_access WHERE user_id = @user_id)))`
+        isAdmin
+          ? `SELECT a.id, a.name, a.description, a.system_prompt, a.model, a.config,
+                    a.owner_id, a.team_id, a.visibility, a.created_at, a.updated_at,
+                    t.name AS team_name
+             FROM agents a
+             LEFT JOIN teams t ON t.id = a.team_id
+             WHERE a.id = @id AND a.deleted_at IS NULL`
+          : `SELECT a.id, a.name, a.description, a.system_prompt, a.model, a.config,
+                    a.owner_id, a.team_id, a.visibility, a.created_at, a.updated_at,
+                    t.name AS team_name
+             FROM agents a
+             LEFT JOIN teams t ON t.id = a.team_id
+             WHERE a.id = @id
+               AND a.deleted_at IS NULL
+               AND (a.owner_id = @user_id
+                    OR (a.visibility = 'team'
+                        AND a.team_id IN (SELECT team_id FROM team_members WHERE user_id = @user_id))
+                    OR (a.visibility = 'selected'
+                        AND a.id IN (SELECT agent_id FROM agent_access WHERE user_id = @user_id)))`
       );
 
     if (result.recordset.length === 0) {
@@ -180,18 +212,28 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
-// PUT /:id — update agent (verify ownership)
+// PUT /:id — update agent (verify ownership or admin)
 router.put('/:id', async (req: Request, res: Response) => {
   try {
     const pool = await getPool();
     const userId = (req as any).user.userId;
 
-    // Verify ownership
+    const roleResult = await pool
+      .request()
+      .input('user_id', sql.UniqueIdentifier, userId)
+      .query('SELECT role FROM users WHERE id = @user_id');
+
+    const isAdmin = roleResult.recordset[0]?.role === 'admin';
+
     const existing = await pool
       .request()
       .input('id', sql.UniqueIdentifier, req.params.id)
       .input('owner_id', sql.UniqueIdentifier, userId)
-      .query('SELECT id FROM agents WHERE id = @id AND owner_id = @owner_id AND deleted_at IS NULL');
+      .query(
+        isAdmin
+          ? 'SELECT id FROM agents WHERE id = @id AND deleted_at IS NULL'
+          : 'SELECT id FROM agents WHERE id = @id AND owner_id = @owner_id AND deleted_at IS NULL'
+      );
 
     if (existing.recordset.length === 0) {
       return res.status(404).json({ error: 'Agent not found' });
@@ -237,7 +279,9 @@ router.put('/:id', async (req: Request, res: Response) => {
     }
 
     await request.query(
-      `UPDATE agents SET ${setClauses.join(', ')} WHERE id = @id AND owner_id = @owner_id`
+      isAdmin
+        ? `UPDATE agents SET ${setClauses.join(', ')} WHERE id = @id`
+        : `UPDATE agents SET ${setClauses.join(', ')} WHERE id = @id AND owner_id = @owner_id`
     );
 
     // Update agent_access if access_user_ids provided
@@ -267,8 +311,11 @@ router.put('/:id', async (req: Request, res: Response) => {
       .input('id', sql.UniqueIdentifier, req.params.id)
       .input('owner_id', sql.UniqueIdentifier, userId)
       .query(
-        `SELECT id, name, description, system_prompt, model, config, owner_id, team_id, visibility, created_at, updated_at
-         FROM agents WHERE id = @id AND owner_id = @owner_id`
+        isAdmin
+          ? `SELECT id, name, description, system_prompt, model, config, owner_id, team_id, visibility, created_at, updated_at
+             FROM agents WHERE id = @id`
+          : `SELECT id, name, description, system_prompt, model, config, owner_id, team_id, visibility, created_at, updated_at
+             FROM agents WHERE id = @id AND owner_id = @owner_id`
       );
 
     return res.json({ agent: updated.recordset[0] });
@@ -284,12 +331,22 @@ router.get('/:id/access', async (req: Request, res: Response) => {
     const pool = await getPool();
     const userId = (req as any).user.userId;
 
-    // Verify ownership
+    const roleResult = await pool
+      .request()
+      .input('user_id', sql.UniqueIdentifier, userId)
+      .query('SELECT role FROM users WHERE id = @user_id');
+
+    const isAdmin = roleResult.recordset[0]?.role === 'admin';
+
     const existing = await pool
       .request()
       .input('id', sql.UniqueIdentifier, req.params.id)
       .input('owner_id', sql.UniqueIdentifier, userId)
-      .query('SELECT id FROM agents WHERE id = @id AND owner_id = @owner_id');
+      .query(
+        isAdmin
+          ? 'SELECT id FROM agents WHERE id = @id'
+          : 'SELECT id FROM agents WHERE id = @id AND owner_id = @owner_id'
+      );
 
     if (existing.recordset.length === 0) {
       return res.status(404).json({ error: 'Agent not found' });

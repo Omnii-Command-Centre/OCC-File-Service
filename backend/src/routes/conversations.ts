@@ -3,8 +3,25 @@ import sql from 'mssql';
 import { v4 as uuidv4 } from 'uuid';
 import { getPool } from '../config/database';
 import { authenticate } from '../middleware/auth';
-import { runAgent, runAgentWithDocument } from '../services/agent-service';
+import { runAgent, runAgentWithDocument, runAgentWithImages } from '../services/agent-service';
 import { CONTRACT_REVIEW_PROMPT } from '../prompts/contract-review';
+import { DROP_TO_DONE_PROMPT } from '../prompts/drop-to-done';
+import {
+  searchContacts,
+  searchCompanies,
+  searchLeads,
+  searchAllBoards,
+  formatSearchResults,
+  createLead,
+  createContact,
+  createCompany,
+  updateItem,
+  updateLeadRelations,
+  createUpdate,
+  createTimelineItem,
+  createTimelineNote,
+  BOARDS,
+} from '../services/monday-bd-service';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
 import { fetchOLTData, fetchCEOBoardData, writeOLTReport } from '../services/monday-service';
@@ -257,6 +274,117 @@ router.post('/:id/contract', async (req: Request, res: Response) => {
   }
 });
 
+// POST /:id/image — send image(s) with a message (badge photos, screenshots for BD drops)
+router.post('/:id/image', async (req: Request, res: Response) => {
+  try {
+    const { content, images } = req.body;
+
+    if (!images || !Array.isArray(images) || images.length === 0) {
+      return res.status(400).json({ error: 'At least one image is required' });
+    }
+    if (images.length > 5) {
+      return res.status(400).json({ error: 'Maximum 5 images per message' });
+    }
+
+    for (const img of images) {
+      if (!img.base64 || !img.mediaType) {
+        return res.status(400).json({ error: 'Each image needs base64 and mediaType' });
+      }
+      const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+      if (!validTypes.includes(img.mediaType)) {
+        return res.status(400).json({ error: `Unsupported image type: ${img.mediaType}. Use JPEG, PNG, GIF or WebP.` });
+      }
+    }
+
+    const pool = await getPool();
+    const userId = (req as any).user.userId;
+
+    const convResult = await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, req.params.id)
+      .input('user_id', sql.UniqueIdentifier, userId)
+      .query('SELECT c.id, c.agent_id FROM conversations c WHERE c.id = @id AND c.user_id = @user_id');
+
+    if (convResult.recordset.length === 0) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    const conversation = convResult.recordset[0];
+
+    const agentResult = await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, conversation.agent_id)
+      .query('SELECT system_prompt, model, config FROM agents WHERE id = @id');
+
+    if (agentResult.recordset.length === 0) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+
+    const agent = agentResult.recordset[0];
+    const userContent = content || 'Process this image.';
+    const now = new Date();
+
+    const userMessageId = uuidv4();
+    await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, userMessageId)
+      .input('conversation_id', sql.UniqueIdentifier, req.params.id)
+      .input('role', sql.NVarChar, 'user')
+      .input('content', sql.NVarChar(sql.MAX), `[Image${images.length > 1 ? 's' : ''} attached] ${userContent}`)
+      .input('created_at', sql.DateTime2, now)
+      .query('INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (@id, @conversation_id, @role, @content, @created_at)');
+
+    const historyResult = await pool
+      .request()
+      .input('conversation_id', sql.UniqueIdentifier, req.params.id)
+      .query('SELECT role, content FROM messages WHERE conversation_id = @conversation_id ORDER BY created_at ASC');
+
+    const msgHistory = historyResult.recordset.map((m: { role: string; content: string }) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content as string,
+    }));
+
+    let systemPrompt = agent.system_prompt || 'You are a helpful assistant.';
+    const agentConfig = JSON.parse(agent.config || '{}');
+    if (agentConfig.integrations?.monday_bd) {
+      systemPrompt = DROP_TO_DONE_PROMPT;
+    }
+
+    const assistantResponse = await runAgentWithImages(
+      systemPrompt,
+      msgHistory,
+      agent.model || 'claude-sonnet-4-20250514',
+      images.map((img: any) => ({ base64: img.base64, mediaType: img.mediaType })),
+      8192
+    );
+
+    const assistantMessageId = uuidv4();
+    const assistantCreatedAt = new Date();
+    await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, assistantMessageId)
+      .input('conversation_id', sql.UniqueIdentifier, req.params.id)
+      .input('role', sql.NVarChar, 'assistant')
+      .input('content', sql.NVarChar(sql.MAX), assistantResponse)
+      .input('created_at', sql.DateTime2, assistantCreatedAt)
+      .query('INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (@id, @conversation_id, @role, @content, @created_at)');
+
+    await pool
+      .request()
+      .input('id', sql.UniqueIdentifier, req.params.id)
+      .input('updated_at', sql.DateTime2, assistantCreatedAt)
+      .query('UPDATE conversations SET updated_at = @updated_at WHERE id = @id');
+
+    return res.json({
+      message: { id: userMessageId, conversation_id: req.params.id, role: 'user', content: `[Image${images.length > 1 ? 's' : ''} attached] ${userContent}`, created_at: now },
+      reply: { id: assistantMessageId, conversation_id: req.params.id, role: 'assistant', content: assistantResponse, created_at: assistantCreatedAt },
+    });
+  } catch (error: any) {
+    console.error('Image upload error:', error);
+    return res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 // POST /:id/messages — send a message and get Claude response
 router.post('/:id/messages', async (req: Request, res: Response) => {
   try {
@@ -409,6 +537,126 @@ Return ONLY the JSON object, no other text.`;
         } else {
           assistantContent = structuredResponse;
         }
+        } else if (agentConfig.integrations?.monday_bd) {
+        // Drop to Done — BD CRM agent with structured JSON actions
+        const bdResponse = await runAgent(
+          DROP_TO_DONE_PROMPT,
+          messages,
+          agent.model || 'claude-sonnet-4-20250514',
+          8192
+        );
+
+        let bdParsed: any = null;
+        try {
+          const jsonMatch = bdResponse.match(/\{[\s\S]*\}/);
+          bdParsed = JSON.parse(jsonMatch ? jsonMatch[0] : bdResponse);
+        } catch {
+          bdParsed = null;
+        }
+
+        if (!bdParsed?.action) {
+          assistantContent = bdResponse;
+        } else if (bdParsed.action === 'chat') {
+          assistantContent = bdParsed.message || bdResponse;
+
+        } else if (bdParsed.action === 'search') {
+          const names: string[] = bdParsed.names || [];
+          let crmContext = '';
+          for (const name of names) {
+            const results = await searchAllBoards(name);
+            crmContext += `\n## Search: "${name}"\n${formatSearchResults(results)}`;
+          }
+
+          const followUp = await runAgent(
+            `${DROP_TO_DONE_PROMPT}\n\n# CRM SEARCH RESULTS\n${crmContext}`,
+            messages,
+            agent.model || 'claude-sonnet-4-20250514',
+            8192
+          );
+
+          let followParsed: any = null;
+          try {
+            const m2 = followUp.match(/\{[\s\S]*\}/);
+            followParsed = JSON.parse(m2 ? m2[0] : followUp);
+          } catch { followParsed = null; }
+
+          if (followParsed?.action === 'create_lead' && followParsed.lead) {
+            const created = await createLead(followParsed.lead);
+            assistantContent = followParsed.message
+              ? `${followParsed.message}\n\nLead created: **${created?.name}** (ID: ${created?.id})`
+              : `Lead created: **${created?.name}** (ID: ${created?.id})`;
+          } else if (followParsed?.action === 'chat') {
+            assistantContent = followParsed.message || followUp;
+          } else {
+            assistantContent = followParsed?.message || followUp;
+          }
+
+        } else if (bdParsed.action === 'create_lead' && bdParsed.lead) {
+          const created = await createLead(bdParsed.lead);
+          assistantContent = bdParsed.message
+            ? `${bdParsed.message}\n\nLead created: **${created?.name}** (ID: ${created?.id})`
+            : `Lead created: **${created?.name}** (ID: ${created?.id})`;
+
+        } else if (bdParsed.action === 'propose') {
+          assistantContent = bdParsed.message || 'Proposal ready — reply "proceed" to create these items.';
+
+        } else if (bdParsed.action === 'create_approved' && Array.isArray(bdParsed.items)) {
+          const createdItems: string[] = [];
+          for (const item of bdParsed.items) {
+            if (item.type === 'company') {
+              const co = await createCompany(item.fields);
+              createdItems.push(`Company: ${co?.name} (ID: ${co?.id})`);
+            } else if (item.type === 'contact') {
+              const ct = await createContact(item.fields);
+              createdItems.push(`Contact: ${ct?.name} (ID: ${ct?.id})`);
+            }
+          }
+
+          if (bdParsed.leadId) {
+            const companyIds = bdParsed.items
+              .filter((i: any) => i.type === 'company')
+              .map((i: any) => i._createdId)
+              .filter(Boolean);
+            const contactIds = bdParsed.items
+              .filter((i: any) => i.type === 'contact')
+              .map((i: any) => i._createdId)
+              .filter(Boolean);
+            if (companyIds.length > 0 || contactIds.length > 0) {
+              await updateLeadRelations(bdParsed.leadId, companyIds, contactIds);
+            }
+          }
+
+          assistantContent = bdParsed.message
+            ? `${bdParsed.message}\n\nCreated:\n${createdItems.map((i) => `- ${i}`).join('\n')}`
+            : `Created:\n${createdItems.map((i) => `- ${i}`).join('\n')}`;
+
+        } else if (bdParsed.action === 'update' && bdParsed.boardId && bdParsed.itemId) {
+          await updateItem(bdParsed.boardId, bdParsed.itemId, bdParsed.columnValues || {});
+          assistantContent = bdParsed.message || `Item ${bdParsed.itemId} updated.`;
+
+        } else if (bdParsed.action === 'log_activity' && bdParsed.contactId) {
+          if (bdParsed.activityType === 'structured' && bdParsed.customActivityId) {
+            await createTimelineItem(
+              bdParsed.contactId,
+              bdParsed.customActivityId,
+              bdParsed.title || 'Activity',
+              bdParsed.summary || '',
+              bdParsed.timestamp || new Date().toISOString()
+            );
+          } else {
+            await createTimelineNote(bdParsed.contactId, bdParsed.summary || bdParsed.title || '');
+          }
+
+          if (bdParsed.contactNotes) {
+            await createUpdate(bdParsed.contactId, bdParsed.contactNotes);
+          }
+
+          assistantContent = bdParsed.message || `Activity logged for contact ${bdParsed.contactId}.`;
+
+        } else {
+          assistantContent = bdParsed.message || bdResponse;
+        }
+
         } else if (agentConfig.integrations?.powerbi_bid) {
         // Step 1: identify which client the user is asking about
         const extractResponse = await runAgent(
